@@ -1,6 +1,6 @@
 
-import { CONTRACT_ADDRESS, TOPIC_SIGNATURE, LGNS_PRECISION } from '../constants';
-import { LGNSEvent } from '../types';
+import { CONTRACT_ADDRESS, TOPIC_SIGNATURE, LGNS_PRECISION } from '../constants.ts';
+import { LGNSEvent } from '../types.ts';
 
 export const fetchPolygonLogs = async (rpcUrl: string, totalBlockCount: number, chunkSize: number): Promise<LGNSEvent[]> => {
   try {
@@ -70,48 +70,4 @@ export const fetchPolygonLogs = async (rpcUrl: string, totalBlockCount: number, 
     console.error('Failed to fetch blockchain logs:', error);
     throw error;
   }
-};
-
-/**
- * Distinguishes EOAs from contracts using JSON-RPC batching (effective multicall).
- * Returns a set of addresses confirmed to be EOAs.
- */
-export const filterEOAs = async (rpcUrl: string, addresses: string[]): Promise<Set<string>> => {
-  if (addresses.length === 0) return new Set();
-  
-  const uniqueAddresses = Array.from(new Set(addresses));
-  const eoaSet = new Set<string>();
-  const batchSize = 50;
-
-  for (let i = 0; i < uniqueAddresses.length; i += batchSize) {
-    const chunk = uniqueAddresses.slice(i, i + batchSize);
-    const requests = chunk.map((addr, idx) => ({
-      jsonrpc: '2.0',
-      id: i + idx,
-      method: 'eth_getCode',
-      params: [addr, 'latest'],
-    }));
-
-    try {
-      const res = await fetch(rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requests),
-      });
-
-      const json = await res.json();
-      const results = Array.isArray(json) ? json : [json];
-
-      results.forEach((result: any, idx: number) => {
-        // '0x' indicates an Externally Owned Account (no code)
-        if (result.result === '0x' || result.result === '0x0') {
-          eoaSet.add(chunk[idx].toLowerCase());
-        }
-      });
-    } catch (err) {
-      console.warn('Batch EOA check failed:', err);
-    }
-  }
-
-  return eoaSet;
 };

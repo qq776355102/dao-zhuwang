@@ -1,10 +1,10 @@
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { fetchPolygonLogs } from './services/blockchainService';
-import { fetchRewards } from './services/ocrosService';
-import { analyzeData } from './services/geminiService';
-import { MergedData, DashboardStats } from './types';
-import StatCard from './components/StatCard';
+import { fetchPolygonLogs } from './services/blockchainService.ts';
+import { fetchRewards } from './services/ocrosService.ts';
+import { analyzeData } from './services/geminiService.ts';
+import { MergedData, DashboardStats } from './types.ts';
+import StatCard from './components/StatCard.tsx';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { 
   CONTRACT_ADDRESS, 
@@ -12,7 +12,7 @@ import {
   DEFAULT_BLOCKS_RANGE, 
   DEFAULT_MIN_THRESHOLD,
   DEFAULT_SCAN_CHUNK
-} from './constants';
+} from './constants.ts';
 
 const App: React.FC = () => {
   const [rpcUrl, setRpcUrl] = useState(() => localStorage.getItem('lgns_rpc') || DEFAULT_POLYGON_RPC);
@@ -46,11 +46,8 @@ const App: React.FC = () => {
       const logs = await fetchPolygonLogs(rpcUrl, blockRange, scanChunkSize);
       const contractLower = CONTRACT_ADDRESS.toLowerCase();
       
-      // Capture the LATEST output (logs are processed chronologically)
       const rawAddressMap = new Map<string, { amount: number, txHash: string }>();
       logs.forEach(event => {
-        // We no longer filter out contract addresses as per user request
-        // but we keep the contract address check if we want to exclude the event source itself
         if (event.address !== contractLower) {
           rawAddressMap.set(event.address, { 
             amount: event.amount, 
@@ -63,7 +60,6 @@ const App: React.FC = () => {
       const filteredAddresses = uniqueAddresses.filter(addr => (rawAddressMap.get(addr)?.amount || 0) >= threshold);
 
       setLoadingStage('rewards');
-      // Fetch rewards for all filtered accounts in parallel (with concurrency limit if needed, but here simple Promise.all)
       const mergedResults: MergedData[] = await Promise.all(
         filteredAddresses.map(async (addr) => {
           const entry = rawAddressMap.get(addr)!;
@@ -98,7 +94,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     processLogs();
-  }, []);
+  }, [processLogs]);
 
   const stats: DashboardStats = useMemo(() => {
     if (data.length === 0) return { totalUsers: 0, totalLgns: 0, avgLevel: 0, peakOutput: 0 };
