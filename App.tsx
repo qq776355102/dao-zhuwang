@@ -24,6 +24,7 @@ const App: React.FC = () => {
   const [data, setData] = useState<MergedData[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingStage, setLoadingStage] = useState<'idle' | 'logs' | 'rewards' | 'analyzing'>('idle');
+  const [rewardProgress, setRewardProgress] = useState({ current: 0, total: 0 });
   const [error, setError] = useState<string | null>(null);
   const [aiAnalysis, setAiAnalysis] = useState<string>('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -60,8 +61,15 @@ const App: React.FC = () => {
       const filteredAddresses = uniqueAddresses.filter(addr => (rawAddressMap.get(addr)?.amount || 0) >= threshold);
 
       setLoadingStage('rewards');
-      const mergedResults: MergedData[] = await Promise.all(
-        filteredAddresses.map(async (addr) => {
+      setRewardProgress({ current: 0, total: filteredAddresses.length });
+      
+      // Batch processing for rewards to prevent "Failed to fetch" (rate limiting/congestion)
+      const CONCURRENCY = 10;
+      const mergedResults: MergedData[] = [];
+      
+      for (let i = 0; i < filteredAddresses.length; i += CONCURRENCY) {
+        const batch = filteredAddresses.slice(i, i + CONCURRENCY);
+        const batchPromises = batch.map(async (addr) => {
           const entry = rawAddressMap.get(addr)!;
           const rewardData = await fetchRewards(addr);
           return {
@@ -72,8 +80,17 @@ const App: React.FC = () => {
             reward: rewardData.reward,
             isFetchingReward: false,
           };
-        })
-      );
+        });
+        
+        const results = await Promise.all(batchPromises);
+        mergedResults.push(...results);
+        setRewardProgress(prev => ({ ...prev, current: mergedResults.length }));
+        
+        // Optional small delay between batches to respect potential API limits
+        if (i + CONCURRENCY < filteredAddresses.length) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
 
       const sortedData = mergedResults.sort((a, b) => b.latestLgns - a.latestLgns);
       setData(sortedData);
@@ -89,6 +106,7 @@ const App: React.FC = () => {
     } finally {
       setLoading(false);
       setLoadingStage('idle');
+      setRewardProgress({ current: 0, total: 0 });
     }
   }, [rpcUrl, blockRange, threshold, scanChunkSize]);
 
@@ -121,7 +139,8 @@ const App: React.FC = () => {
   const getLoadingText = () => {
     switch(loadingStage) {
       case 'logs': return 'Scanning Network...';
-      case 'rewards': return 'Fetching Community Data...';
+      case 'rewards': 
+        return `Syncing Community (${rewardProgress.current}/${rewardProgress.total})`;
       case 'analyzing': return 'AI Synthesis...';
       default: return 'Loading...';
     }
@@ -208,9 +227,9 @@ const App: React.FC = () => {
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           <StatCard label="Active Accounts" value={stats.totalUsers} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>} />
-          <StatCard label="Total LGNS" value={stats.totalLgns.toLocaleString(undefined, { maximumFractionDigits: 2 })} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>} />
+          <StatCard label="Total LGNS" value={stats.totalLgns.toLocaleString(undefined, { maximumFractionDigits: 1 })} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>} />
           <StatCard label="Avg Community Level" value={stats.avgLevel.toFixed(1)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 2m6-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>} />
-          <StatCard label="Peak Observed" value={stats.peakOutput.toLocaleString(undefined, { maximumFractionDigits: 6 })} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>} />
+          <StatCard label="Peak Observed" value={stats.peakOutput.toLocaleString(undefined, { maximumFractionDigits: 1 })} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>} />
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -276,10 +295,10 @@ const App: React.FC = () => {
                             </span>
                           </td>
                           <td className="px-6 py-4 text-right font-medium text-emerald-600">
-                            {item.reward.toLocaleString()}
+                            {item.reward.toFixed(1)}
                           </td>
                           <td className="px-6 py-4 text-right">
-                            <span className="text-sm font-bold text-gray-900">{item.latestLgns.toFixed(8)}</span>
+                            <span className="text-sm font-bold text-gray-900">{item.latestLgns.toFixed(1)}</span>
                             <span className="ml-1 text-[9px] text-gray-400 font-bold uppercase tracking-tighter">LGNS</span>
                           </td>
                           <td className="px-6 py-4 text-right">
