@@ -13,12 +13,15 @@ export const analyzeData = async (data: MergedData[]) => {
 
   const summary = data.map(d => ({
     addr: d.address.slice(0, 8),
-    lgns: d.latestLgns.toFixed(1),
+    spiderReward: d.latestLgns.toFixed(2),
     level: d.level,
-    reward: d.reward.toFixed(1)
+    daoReward: d.reward.toFixed(2)
   })).slice(0, 8);
 
-  const prompt = `Review this Polygon LGNS production summary (latest values): ${JSON.stringify(summary)}. 
+  const prompt = `Review this Polygon LGNS production summary. 
+  "spiderReward" is the production volume from logs. 
+  "daoReward" is the community level reward. 
+  Data: ${JSON.stringify(summary)}. 
   Briefly summarize the activity level and distribution in 2-3 sentences.`;
 
   try {

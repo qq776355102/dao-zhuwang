@@ -159,12 +159,15 @@ const App: React.FC = () => {
     // Sort
     if (sortConfig.direction) {
       result.sort((a, b) => {
-        const valA = a[sortConfig.key] || 0;
-        const valB = b[sortConfig.key] || 0;
+        const valA = Number(a[sortConfig.key]) || 0;
+        const valB = Number(b[sortConfig.key]) || 0;
+        
+        if (valA === valB) return 0;
+        
         if (sortConfig.direction === 'asc') {
-          return valA > valB ? 1 : -1;
+          return valA - valB;
         } else {
-          return valA < valB ? 1 : -1;
+          return valB - valA;
         }
       });
     } else {
@@ -197,8 +200,6 @@ const App: React.FC = () => {
   const safeFixed = (val: any, decimals: number = 2) => {
     const num = Number(val);
     if (isNaN(num)) return "0.00";
-    // Using toLocaleString for better formatting with commas if needed, 
-    // but fixed 2 decimals is safer for column alignment
     return num.toFixed(decimals);
   };
 
@@ -325,9 +326,9 @@ const App: React.FC = () => {
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
               <StatCard label="Active Accounts" value={stats.totalUsers} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>} />
-              <StatCard label="Total LGNS" value={safeFixed(stats.totalLgns)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>} />
-              <StatCard label="Avg Level" value={safeFixed(stats.avgLevel, 1)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>} />
-              <StatCard label="Peak Output" value={safeFixed(stats.peakOutput)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-7.714 2.143L11 21l-2.286-6.857L1 12l7.714-2.143L11 3z" /></svg>} />
+              <StatCard label="Total Spider Reward" value={safeFixed(stats.totalLgns)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>} />
+              <StatCard label="Avg Account Level" value={safeFixed(stats.avgLevel, 1)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>} />
+              <StatCard label="Peak Spider Output" value={safeFixed(stats.peakOutput)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-7.714 2.143L11 21l-2.286-6.857L1 12l7.714-2.143L11 3z" /></svg>} />
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -475,7 +476,7 @@ const App: React.FC = () => {
                       <span className="font-bold text-gray-900">{blockRange.toLocaleString()} Blocks (~10h)</span>
                     </div>
                     <div className="flex justify-between items-center border-t border-gray-100 pt-3">
-                      <span className="text-gray-500 font-medium">Precision</span>
+                      <span className="text-gray-500 font-medium">Precision Factor</span>
                       <span className="font-bold text-gray-900">10^{LGNS_PRECISION}</span>
                     </div>
                   </div>
