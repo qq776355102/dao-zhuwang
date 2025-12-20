@@ -11,8 +11,12 @@ import {
   DEFAULT_POLYGON_RPC, 
   DEFAULT_BLOCKS_RANGE, 
   DEFAULT_MIN_THRESHOLD,
-  DEFAULT_SCAN_CHUNK
+  DEFAULT_SCAN_CHUNK,
+  LGNS_PRECISION
 } from './constants.ts';
+
+type SortKey = 'level' | 'reward' | 'latestLgns';
+type SortDirection = 'asc' | 'desc' | null;
 
 const App: React.FC = () => {
   const [rpcUrl, setRpcUrl] = useState(() => localStorage.getItem('lgns_rpc') || DEFAULT_POLYGON_RPC);
@@ -21,6 +25,12 @@ const App: React.FC = () => {
   const [scanChunkSize, setScanChunkSize] = useState(() => Number(localStorage.getItem('lgns_chunk')) || DEFAULT_SCAN_CHUNK);
   const [showSettings, setShowSettings] = useState(false);
   const [searchAddress, setSearchAddress] = useState('');
+  
+  // Sorting state
+  const [sortConfig, setSortConfig] = useState<{ key: SortKey; direction: SortDirection }>({ 
+    key: 'latestLgns', 
+    direction: 'desc' 
+  });
 
   const [data, setData] = useState<MergedData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -102,13 +112,12 @@ const App: React.FC = () => {
         }
       }
 
-      const sortedData = mergedResults.sort((a, b) => b.latestLgns - a.latestLgns);
-      setData(sortedData);
+      setData(mergedResults);
 
       setLoadingStage('analyzing');
       setIsAnalyzing(true);
       try {
-        const analysis = await analyzeData(sortedData);
+        const analysis = await analyzeData(mergedResults);
         setAiAnalysis(String(analysis || ""));
       } catch (aiErr) {
         console.warn("AI Analysis failed:", aiErr);
@@ -128,18 +137,48 @@ const App: React.FC = () => {
     processLogs();
   }, [processLogs]);
 
-  const filteredData = useMemo(() => {
-    if (!searchAddress) return data;
-    const lowerSearch = searchAddress.toLowerCase();
-    return data.filter(item => item.address.toLowerCase().includes(lowerSearch));
-  }, [data, searchAddress]);
+  const handleSort = (key: SortKey) => {
+    let direction: SortDirection = 'desc';
+    if (sortConfig.key === key && sortConfig.direction === 'desc') {
+      direction = 'asc';
+    } else if (sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = null; // Reset sort
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const sortedAndFilteredData = useMemo(() => {
+    let result = [...data];
+    
+    // Search filter
+    if (searchAddress) {
+      const lowerSearch = searchAddress.toLowerCase();
+      result = result.filter(item => item.address.toLowerCase().includes(lowerSearch));
+    }
+
+    // Sort
+    if (sortConfig.direction) {
+      result.sort((a, b) => {
+        const valA = a[sortConfig.key] || 0;
+        const valB = b[sortConfig.key] || 0;
+        if (sortConfig.direction === 'asc') {
+          return valA > valB ? 1 : -1;
+        } else {
+          return valA < valB ? 1 : -1;
+        }
+      });
+    } else {
+      // Default fallback sort (highest Spider Reward)
+      result.sort((a, b) => b.latestLgns - a.latestLgns);
+    }
+
+    return result;
+  }, [data, searchAddress, sortConfig]);
 
   const stats: DashboardStats = useMemo(() => {
     if (!data || !Array.isArray(data) || data.length === 0) {
       return { totalUsers: 0, totalLgns: 0, avgLevel: 0, peakOutput: 0 };
     }
-    // We base stats on the FULL dataset to represent the "Network Pulse", 
-    // but you could use filteredData if preferred.
     const totalLgns = data.reduce((acc, curr) => acc + (Number(curr.latestLgns) || 0), 0);
     const peak = data.reduce((max, d) => Math.max(max, Number(d.latestLgns) || 0), 0);
     const avgLvl = data.reduce((acc, curr) => acc + (Number(curr.level) || 0), 0) / data.length;
@@ -147,18 +186,20 @@ const App: React.FC = () => {
   }, [data]);
 
   const chartData = useMemo(() => {
-    // Only show top 10 from the CURRENT filter view
-    return filteredData
+    return sortedAndFilteredData
       .slice(0, 10)
       .map(d => ({
         address: d.address ? (d.address.slice(0, 6) + '...' + d.address.slice(-4)) : 'N/A',
         amount: Number(d.latestLgns) || 0,
       }));
-  }, [filteredData]);
+  }, [sortedAndFilteredData]);
 
-  const safeFixed = (val: any, decimals: number = 1) => {
+  const safeFixed = (val: any, decimals: number = 2) => {
     const num = Number(val);
-    return isNaN(num) ? "0.0" : num.toFixed(decimals);
+    if (isNaN(num)) return "0.00";
+    // Using toLocaleString for better formatting with commas if needed, 
+    // but fixed 2 decimals is safer for column alignment
+    return num.toFixed(decimals);
   };
 
   const handleCopy = (text: string) => {
@@ -183,6 +224,25 @@ const App: React.FC = () => {
       case 'analyzing': return 'Running AI Insights...';
       default: return 'Loading...';
     }
+  };
+
+  const SortIcon = ({ column }: { column: SortKey }) => {
+    if (sortConfig.key !== column || !sortConfig.direction) {
+      return (
+        <svg className="w-3 h-3 ml-1 text-gray-300 opacity-0 group-hover:opacity-100" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+        </svg>
+      );
+    }
+    return sortConfig.direction === 'asc' ? (
+      <svg className="w-3 h-3 ml-1 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 15l7-7 7 7" />
+      </svg>
+    ) : (
+      <svg className="w-3 h-3 ml-1 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+      </svg>
+    );
   };
 
   return (
@@ -266,7 +326,7 @@ const App: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
               <StatCard label="Active Accounts" value={stats.totalUsers} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>} />
               <StatCard label="Total LGNS" value={safeFixed(stats.totalLgns)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>} />
-              <StatCard label="Avg Level" value={safeFixed(stats.avgLevel)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>} />
+              <StatCard label="Avg Level" value={safeFixed(stats.avgLevel, 1)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>} />
               <StatCard label="Peak Output" value={safeFixed(stats.peakOutput)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-7.714 2.143L11 21l-2.286-6.857L1 12l7.714-2.143L11 3z" /></svg>} />
             </div>
 
@@ -292,19 +352,34 @@ const App: React.FC = () => {
                     <table className="w-full text-left text-sm border-collapse">
                       <thead className="bg-gray-50 text-gray-500 font-bold uppercase text-[10px]">
                         <tr>
-                          <th className="px-6 py-4 border-b">Full Address</th>
-                          <th className="px-6 py-4 border-b text-center">Lvl</th>
-                          <th className="px-6 py-4 border-b text-right">Reward</th>
-                          <th className="px-6 py-4 border-b text-right">Max LGNS</th>
+                          <th className="px-6 py-4 border-b">Full Wallet Address</th>
+                          <th 
+                            className="px-4 py-4 border-b text-center cursor-pointer hover:bg-gray-100 transition-colors group select-none"
+                            onClick={() => handleSort('level')}
+                          >
+                            <div className="flex items-center justify-center">Lvl <SortIcon column="level" /></div>
+                          </th>
+                          <th 
+                            className="px-6 py-4 border-b text-right cursor-pointer hover:bg-gray-100 transition-colors group select-none"
+                            onClick={() => handleSort('reward')}
+                          >
+                            <div className="flex items-center justify-end">DAO Reward <SortIcon column="reward" /></div>
+                          </th>
+                          <th 
+                            className="px-6 py-4 border-b text-right cursor-pointer hover:bg-gray-100 transition-colors group select-none"
+                            onClick={() => handleSort('latestLgns')}
+                          >
+                            <div className="flex items-center justify-end">Spider Reward <SortIcon column="latestLgns" /></div>
+                          </th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
                         {loading && data.length === 0 ? (
                           <tr><td colSpan={4} className="px-6 py-20 text-center text-gray-400 italic">Synchronizing network states...</td></tr>
-                        ) : filteredData.length === 0 ? (
+                        ) : sortedAndFilteredData.length === 0 ? (
                           <tr><td colSpan={4} className="px-6 py-20 text-center text-gray-400 italic">No records matching criteria.</td></tr>
                         ) : (
-                          filteredData.map((item) => (
+                          sortedAndFilteredData.map((item) => (
                             <tr key={item.address} className="hover:bg-indigo-50/30 transition-colors group">
                               <td className="px-6 py-4 font-mono text-[13px] leading-relaxed">
                                 <div className="flex items-center space-x-3">
@@ -322,7 +397,7 @@ const App: React.FC = () => {
                                   </button>
                                 </div>
                               </td>
-                              <td className="px-6 py-4 text-center">
+                              <td className="px-4 py-4 text-center">
                                 <span className={`px-2.5 py-1 rounded text-[11px] font-bold ${item.level > 0 ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'}`}>
                                   L{item.level}
                                 </span>
@@ -398,6 +473,10 @@ const App: React.FC = () => {
                     <div className="flex justify-between items-center border-t border-gray-100 pt-3">
                       <span className="text-gray-500 font-medium">Current Window</span>
                       <span className="font-bold text-gray-900">{blockRange.toLocaleString()} Blocks (~10h)</span>
+                    </div>
+                    <div className="flex justify-between items-center border-t border-gray-100 pt-3">
+                      <span className="text-gray-500 font-medium">Precision</span>
+                      <span className="font-bold text-gray-900">10^{LGNS_PRECISION}</span>
                     </div>
                   </div>
                 </div>

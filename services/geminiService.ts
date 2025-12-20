@@ -1,16 +1,13 @@
+
 import { GoogleGenAI } from "@google/genai";
 import { MergedData } from "../types.ts";
 
+/**
+ * Generates an AI summary of the provided data using Gemini 3 Flash.
+ */
 export const analyzeData = async (data: MergedData[]) => {
-  // Defensive check for process.env
-  const apiKey = (typeof process !== 'undefined' && process.env) ? process.env.API_KEY : undefined;
-  
-  if (!apiKey) {
-    console.warn("Gemini API key not found in environment.");
-    return "AI insights unavailable: API key not configured.";
-  }
-
-  const ai = new GoogleGenAI({ apiKey });
+  // Use process.env.API_KEY directly as per the @google/genai initialization guidelines.
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
   if (!data || data.length === 0) return "Insufficient data for detailed analysis.";
 
@@ -29,6 +26,7 @@ export const analyzeData = async (data: MergedData[]) => {
       model: 'gemini-3-flash-preview',
       contents: prompt,
     });
+    // Access response.text property directly as per guidelines.
     return response.text || "No analysis generated.";
   } catch (error) {
     console.error("Gemini Analysis Error:", error);
