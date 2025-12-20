@@ -20,6 +20,7 @@ const App: React.FC = () => {
   const [threshold, setThreshold] = useState(() => Number(localStorage.getItem('lgns_threshold')) || DEFAULT_MIN_THRESHOLD);
   const [scanChunkSize, setScanChunkSize] = useState(() => Number(localStorage.getItem('lgns_chunk')) || DEFAULT_SCAN_CHUNK);
   const [showSettings, setShowSettings] = useState(false);
+  const [searchAddress, setSearchAddress] = useState('');
 
   const [data, setData] = useState<MergedData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -28,6 +29,143 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [aiAnalysis, setAiAnalysis] = useState<string>('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
+
+  const processLogs = useCallback(async () => {
+    try {
+      setLoading(true);
+      setLoadingStage('logs');
+      setError(null);
+      
+      const logs = await fetchPolygonLogs(rpcUrl, blockRange, scanChunkSize);
+      if (!Array.isArray(logs)) throw new Error("Invalid response from blockchain node.");
+      
+      const contractLower = (CONTRACT_ADDRESS || "").toLowerCase();
+      const rawAddressMap = new Map<string, { amount: number, txHash: string }>();
+      
+      logs.forEach(event => {
+        if (!event || !event.address) return;
+        const addr = event.address.toLowerCase();
+        if (addr !== contractLower) {
+          const current = rawAddressMap.get(addr);
+          if (!current || event.amount > current.amount) {
+            rawAddressMap.set(addr, { 
+              amount: event.amount, 
+              txHash: event.transactionHash 
+            });
+          }
+        }
+      });
+
+      const uniqueAddresses = Array.from(rawAddressMap.keys());
+      const filteredAddresses = uniqueAddresses.filter(addr => (rawAddressMap.get(addr)?.amount || 0) >= threshold);
+
+      setLoadingStage('rewards');
+      setRewardProgress({ current: 0, total: filteredAddresses.length });
+      
+      const CONCURRENCY = 8;
+      const mergedResults: MergedData[] = [];
+      
+      for (let i = 0; i < filteredAddresses.length; i += CONCURRENCY) {
+        const batch = filteredAddresses.slice(i, i + CONCURRENCY);
+        const batchPromises = batch.map(async (addr) => {
+          try {
+            const entry = rawAddressMap.get(addr)!;
+            const rewardData = await fetchRewards(addr);
+            return {
+              address: addr,
+              latestLgns: entry.amount,
+              latestTxHash: entry.txHash,
+              level: rewardData?.level ?? 0,
+              reward: rewardData?.reward ?? 0,
+              isFetchingReward: false,
+            };
+          } catch (e) {
+            const entry = rawAddressMap.get(addr)!;
+            return {
+              address: addr,
+              latestLgns: entry.amount,
+              latestTxHash: entry.txHash,
+              level: 0,
+              reward: 0,
+              isFetchingReward: false,
+            };
+          }
+        });
+        
+        const results = await Promise.all(batchPromises);
+        mergedResults.push(...results);
+        setRewardProgress(prev => ({ ...prev, current: mergedResults.length }));
+        
+        if (i + CONCURRENCY < filteredAddresses.length) {
+          await new Promise(resolve => setTimeout(resolve, 30));
+        }
+      }
+
+      const sortedData = mergedResults.sort((a, b) => b.latestLgns - a.latestLgns);
+      setData(sortedData);
+
+      setLoadingStage('analyzing');
+      setIsAnalyzing(true);
+      try {
+        const analysis = await analyzeData(sortedData);
+        setAiAnalysis(String(analysis || ""));
+      } catch (aiErr) {
+        console.warn("AI Analysis failed:", aiErr);
+      }
+      setIsAnalyzing(false);
+
+    } catch (err: any) {
+      console.error("Critical Failure:", err);
+      setError(err.message || 'An unexpected error occurred during data synchronization.');
+    } finally {
+      setLoading(false);
+      setLoadingStage('idle');
+    }
+  }, [rpcUrl, blockRange, threshold, scanChunkSize]);
+
+  useEffect(() => {
+    processLogs();
+  }, [processLogs]);
+
+  const filteredData = useMemo(() => {
+    if (!searchAddress) return data;
+    const lowerSearch = searchAddress.toLowerCase();
+    return data.filter(item => item.address.toLowerCase().includes(lowerSearch));
+  }, [data, searchAddress]);
+
+  const stats: DashboardStats = useMemo(() => {
+    if (!data || !Array.isArray(data) || data.length === 0) {
+      return { totalUsers: 0, totalLgns: 0, avgLevel: 0, peakOutput: 0 };
+    }
+    // We base stats on the FULL dataset to represent the "Network Pulse", 
+    // but you could use filteredData if preferred.
+    const totalLgns = data.reduce((acc, curr) => acc + (Number(curr.latestLgns) || 0), 0);
+    const peak = data.reduce((max, d) => Math.max(max, Number(d.latestLgns) || 0), 0);
+    const avgLvl = data.reduce((acc, curr) => acc + (Number(curr.level) || 0), 0) / data.length;
+    return { totalUsers: data.length, totalLgns, avgLevel: avgLvl, peakOutput: peak };
+  }, [data]);
+
+  const chartData = useMemo(() => {
+    // Only show top 10 from the CURRENT filter view
+    return filteredData
+      .slice(0, 10)
+      .map(d => ({
+        address: d.address ? (d.address.slice(0, 6) + '...' + d.address.slice(-4)) : 'N/A',
+        amount: Number(d.latestLgns) || 0,
+      }));
+  }, [filteredData]);
+
+  const safeFixed = (val: any, decimals: number = 1) => {
+    const num = Number(val);
+    return isNaN(num) ? "0.0" : num.toFixed(decimals);
+  };
+
+  const handleCopy = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedAddress(text);
+    setTimeout(() => setCopiedAddress(null), 2000);
+  };
 
   const saveSettings = () => {
     localStorage.setItem('lgns_rpc', rpcUrl);
@@ -38,110 +176,11 @@ const App: React.FC = () => {
     setShowSettings(false);
   };
 
-  const processLogs = useCallback(async () => {
-    try {
-      setLoading(true);
-      setLoadingStage('logs');
-      setError(null);
-      
-      const logs = await fetchPolygonLogs(rpcUrl, blockRange, scanChunkSize);
-      const contractLower = CONTRACT_ADDRESS.toLowerCase();
-      
-      const rawAddressMap = new Map<string, { amount: number, txHash: string }>();
-      logs.forEach(event => {
-        if (event.address !== contractLower) {
-          rawAddressMap.set(event.address, { 
-            amount: event.amount, 
-            txHash: event.transactionHash 
-          });
-        }
-      });
-
-      const uniqueAddresses = Array.from(rawAddressMap.keys());
-      const filteredAddresses = uniqueAddresses.filter(addr => (rawAddressMap.get(addr)?.amount || 0) >= threshold);
-
-      setLoadingStage('rewards');
-      setRewardProgress({ current: 0, total: filteredAddresses.length });
-      
-      // Batch processing for rewards to prevent "Failed to fetch" (rate limiting/congestion)
-      const CONCURRENCY = 10;
-      const mergedResults: MergedData[] = [];
-      
-      for (let i = 0; i < filteredAddresses.length; i += CONCURRENCY) {
-        const batch = filteredAddresses.slice(i, i + CONCURRENCY);
-        const batchPromises = batch.map(async (addr) => {
-          const entry = rawAddressMap.get(addr)!;
-          const rewardData = await fetchRewards(addr);
-          return {
-            address: addr,
-            latestLgns: entry.amount,
-            latestTxHash: entry.txHash,
-            level: rewardData.level,
-            reward: rewardData.reward,
-            isFetchingReward: false,
-          };
-        });
-        
-        const results = await Promise.all(batchPromises);
-        mergedResults.push(...results);
-        setRewardProgress(prev => ({ ...prev, current: mergedResults.length }));
-        
-        // Optional small delay between batches to respect potential API limits
-        if (i + CONCURRENCY < filteredAddresses.length) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-      }
-
-      const sortedData = mergedResults.sort((a, b) => b.latestLgns - a.latestLgns);
-      setData(sortedData);
-
-      setLoadingStage('analyzing');
-      setIsAnalyzing(true);
-      const analysis = await analyzeData(sortedData);
-      setAiAnalysis(analysis);
-      setIsAnalyzing(false);
-
-    } catch (err: any) {
-      setError(err.message || 'Processing error occurred.');
-    } finally {
-      setLoading(false);
-      setLoadingStage('idle');
-      setRewardProgress({ current: 0, total: 0 });
-    }
-  }, [rpcUrl, blockRange, threshold, scanChunkSize]);
-
-  useEffect(() => {
-    processLogs();
-  }, [processLogs]);
-
-  const stats: DashboardStats = useMemo(() => {
-    if (data.length === 0) return { totalUsers: 0, totalLgns: 0, avgLevel: 0, peakOutput: 0 };
-    const totalLgns = data.reduce((acc, curr) => acc + curr.latestLgns, 0);
-    const peak = Math.max(...data.map(d => d.latestLgns));
-    const avgLvl = data.reduce((acc, curr) => acc + curr.level, 0) / data.length;
-    return {
-      totalUsers: data.length,
-      totalLgns,
-      avgLevel: avgLvl,
-      peakOutput: peak,
-    };
-  }, [data]);
-
-  const chartData = useMemo(() => {
-    return data
-      .slice(0, 10)
-      .map(d => ({
-        address: d.address.slice(0, 6) + '...' + d.address.slice(-4),
-        amount: d.latestLgns,
-      }));
-  }, [data]);
-
   const getLoadingText = () => {
     switch(loadingStage) {
-      case 'logs': return 'Scanning Network...';
-      case 'rewards': 
-        return `Syncing Community (${rewardProgress.current}/${rewardProgress.total})`;
-      case 'analyzing': return 'AI Synthesis...';
+      case 'logs': return 'Reading Polygon Logs...';
+      case 'rewards': return `Fetching Community (${rewardProgress.current}/${rewardProgress.total})`;
+      case 'analyzing': return 'Running AI Insights...';
       default: return 'Loading...';
     }
   };
@@ -149,254 +188,224 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-[#f8fafc]">
       <nav className="bg-white border-b border-gray-200 sticky top-0 z-30 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16 items-center">
-            <div className="flex items-center space-x-3">
-              <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold">L</div>
-              <div>
-                <h1 className="text-xl font-bold text-gray-900 tracking-tight leading-none">LGNS Explorer</h1>
-                <p className="text-[10px] text-gray-400 mt-1 uppercase font-bold tracking-wider">Comprehensive Registry v2.6</p>
-              </div>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex justify-between items-center">
+          <div className="flex items-center space-x-3">
+            <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold shadow-sm">L</div>
+            <div className="flex flex-col">
+              <h1 className="text-xl font-bold text-gray-900 tracking-tight leading-none">LGNS Registry</h1>
+              <span className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">10H Network Pulse</span>
             </div>
-            <div className="flex items-center space-x-3">
-              <button 
-                onClick={() => setShowSettings(!showSettings)}
-                className={`p-2 rounded-md transition-all ${showSettings ? 'bg-indigo-100 text-indigo-700 ring-2 ring-indigo-200' : 'text-gray-500 hover:bg-gray-100'}`}
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-              </button>
-              <button 
-                onClick={processLogs}
-                disabled={loading}
-                className="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 transition-colors"
-              >
-                {loading && (
-                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                )}
-                {loading ? getLoadingText() : 'Sync Logs'}
-              </button>
-            </div>
+          </div>
+          <div className="flex items-center space-x-3">
+            <button onClick={() => setShowSettings(!showSettings)} className="p-2 text-gray-500 hover:bg-indigo-50 hover:text-indigo-600 rounded-md transition-colors" title="Settings">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg>
+            </button>
+            <button onClick={processLogs} disabled={loading} className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm font-bold disabled:opacity-50 min-w-[140px] shadow-sm hover:bg-indigo-700 transition-all">
+              {loading ? getLoadingText() : 'Refresh Data'}
+            </button>
           </div>
         </div>
       </nav>
 
       {showSettings && (
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-4 animate-in fade-in slide-in-from-top-4 duration-300">
-          <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-xl relative z-40">
-            <h3 className="text-sm font-bold text-gray-900 uppercase tracking-widest mb-6">Scanner Config</h3>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              <div className="space-y-2">
-                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider">RPC Endpoint</label>
-                <input type="text" value={rpcUrl} onChange={(e) => setRpcUrl(e.target.value)} className="w-full px-4 py-3 bg-white text-gray-900 border border-gray-300 rounded-lg text-sm mono focus:ring-2 focus:ring-indigo-500 outline-none" />
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-4 animate-in fade-in slide-in-from-top-2 duration-300">
+          <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-xl space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+              <div className="flex flex-col space-y-1.5">
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">RPC Endpoint</label>
+                <input 
+                  type="text" 
+                  value={rpcUrl} 
+                  onChange={e => setRpcUrl(e.target.value)} 
+                  className="bg-gray-50 text-gray-900 border border-gray-300 p-3 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none w-full shadow-sm"
+                />
               </div>
-              <div className="space-y-2">
-                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider">History (Blocks)</label>
-                <input type="number" value={blockRange} onChange={(e) => setBlockRange(Number(e.target.value))} className="w-full px-4 py-3 bg-white text-gray-900 border border-gray-300 rounded-lg text-sm mono focus:ring-2 focus:ring-indigo-500 outline-none" />
+              <div className="flex flex-col space-y-1.5">
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Window (Blocks)</label>
+                <input 
+                  type="number" 
+                  value={blockRange} 
+                  onChange={e => setBlockRange(Number(e.target.value))} 
+                  className="bg-gray-50 text-gray-900 border border-gray-300 p-3 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none w-full shadow-sm"
+                />
               </div>
-              <div className="space-y-2">
-                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider">Audit Batch</label>
-                <input type="number" value={scanChunkSize} onChange={(e) => setScanChunkSize(Number(e.target.value))} className="w-full px-4 py-3 bg-white text-gray-900 border border-gray-300 rounded-lg text-sm mono focus:ring-2 focus:ring-indigo-500 outline-none" />
+              <div className="flex flex-col space-y-1.5">
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Min Threshold (LGNS)</label>
+                <input 
+                  type="number" 
+                  value={threshold} 
+                  onChange={e => setThreshold(Number(e.target.value))} 
+                  className="bg-gray-50 text-gray-900 border border-gray-300 p-3 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none w-full shadow-sm"
+                />
               </div>
-              <div className="space-y-2">
-                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider">Threshold (LGNS)</label>
-                <input type="number" value={threshold} onChange={(e) => setThreshold(Number(e.target.value))} className="w-full px-4 py-3 bg-white text-gray-900 border border-gray-300 rounded-lg text-sm mono focus:ring-2 focus:ring-indigo-500 outline-none" />
+              <div className="flex items-end">
+                <button 
+                  onClick={saveSettings} 
+                  className="bg-indigo-600 text-white w-full py-3 px-4 rounded-lg font-bold text-sm hover:bg-indigo-700 shadow-md transition-all active:scale-[0.98]"
+                >
+                  Apply & Synchronize
+                </button>
               </div>
-            </div>
-            <div className="mt-8 flex justify-end items-center space-x-4 border-t border-gray-100 pt-6">
-              <button onClick={() => setShowSettings(false)} className="px-4 py-2 text-sm font-semibold text-gray-500 hover:text-gray-800 transition-colors">Cancel</button>
-              <button onClick={saveSettings} className="px-8 py-2.5 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 transition-all shadow-lg active:scale-95">Apply & Reload</button>
             </div>
           </div>
         </div>
       )}
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {error && (
-          <div className="mb-8 p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg flex items-center space-x-3 shadow-sm">
-            <svg className="h-5 w-5 text-red-400" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" /></svg>
-            <span className="font-medium">{error}</span>
+        {error ? (
+          <div className="bg-red-50 border border-red-200 text-red-700 p-6 rounded-xl flex items-center space-x-4 shadow-sm">
+            <svg className="w-12 h-12 text-red-400" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" /></svg>
+            <div>
+              <p className="font-bold text-lg">System Error</p>
+              <p className="text-sm">{error}</p>
+              <button onClick={processLogs} className="mt-2 text-xs font-bold underline hover:no-underline">Retry Data Sync</button>
+            </div>
           </div>
-        )}
+        ) : (
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+              <StatCard label="Active Accounts" value={stats.totalUsers} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>} />
+              <StatCard label="Total LGNS" value={safeFixed(stats.totalLgns)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>} />
+              <StatCard label="Avg Level" value={safeFixed(stats.avgLevel)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>} />
+              <StatCard label="Peak Output" value={safeFixed(stats.peakOutput)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-7.714 2.143L11 21l-2.286-6.857L1 12l7.714-2.143L11 3z" /></svg>} />
+            </div>
 
-        <div className="mb-6 flex items-center space-x-2 text-xs text-gray-500 bg-white/80 backdrop-blur-md px-4 py-2 rounded-full border border-gray-200 w-fit shadow-sm">
-          <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
-          <span className="font-medium">Scope: <strong>All Accounts ≥ {threshold} LGNS</strong></span>
-          <span className="mx-2 text-gray-300">|</span>
-          <span className="font-medium">Latest Production Records</span>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-          <StatCard label="Active Accounts" value={stats.totalUsers} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>} />
-          <StatCard label="Total LGNS" value={stats.totalLgns.toLocaleString(undefined, { maximumFractionDigits: 1 })} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>} />
-          <StatCard label="Avg Community Level" value={stats.avgLevel.toFixed(1)} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 2m6-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>} />
-          <StatCard label="Peak Observed" value={stats.peakOutput.toLocaleString(undefined, { maximumFractionDigits: 1 })} icon={<svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>} />
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          <div className="lg:col-span-2 space-y-8">
-            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-              <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
-                <div className="flex flex-col">
-                  <h2 className="text-lg font-bold text-gray-900">Account Production Table</h2>
-                  <p className="text-[10px] text-gray-400 font-medium uppercase tracking-tight">Displaying Level, Reward, and latest LGNS output</p>
-                </div>
-                <div className="flex items-center space-x-2 text-emerald-600 font-bold text-xs uppercase tracking-widest">
-                   <div className="w-2 h-2 bg-current rounded-full animate-pulse"></div>
-                   <span>Mainnet Live</span>
-                </div>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                  <thead className="bg-gray-50 text-xs font-bold text-gray-500 uppercase tracking-wider">
-                    <tr>
-                      <th className="px-6 py-4">Account Address</th>
-                      <th className="px-6 py-4 text-center">Level</th>
-                      <th className="px-6 py-4 text-right">Reward</th>
-                      <th className="px-6 py-4 text-right">Latest LGNS</th>
-                      <th className="px-6 py-4 text-right">Tx Proof</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {loading ? (
-                      Array.from({ length: 5 }).map((_, i) => (
-                        <tr key={i} className="animate-pulse">
-                          <td className="px-6 py-4"><div className="h-4 bg-gray-200 rounded w-48"></div></td>
-                          <td className="px-6 py-4 text-center"><div className="h-4 bg-gray-200 rounded w-8 mx-auto"></div></td>
-                          <td className="px-6 py-4 text-right"><div className="h-4 bg-gray-200 rounded w-16 ml-auto"></div></td>
-                          <td className="px-6 py-4 text-right"><div className="h-4 bg-gray-200 rounded w-20 ml-auto"></div></td>
-                          <td className="px-6 py-4 text-right"><div className="h-4 bg-gray-200 rounded w-12 ml-auto"></div></td>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+              <div className="lg:col-span-2 space-y-6">
+                <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                  <div className="px-6 py-4 bg-gray-50/50 border-b border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <h2 className="font-bold text-gray-900">Distribution Table</h2>
+                    <div className="relative flex-1 max-w-md">
+                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <svg className="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                      </div>
+                      <input 
+                        type="text" 
+                        placeholder="Filter by address..." 
+                        value={searchAddress}
+                        onChange={(e) => setSearchAddress(e.target.value)}
+                        className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg leading-5 bg-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-all"
+                      />
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm border-collapse">
+                      <thead className="bg-gray-50 text-gray-500 font-bold uppercase text-[10px]">
+                        <tr>
+                          <th className="px-6 py-4 border-b">Full Address</th>
+                          <th className="px-6 py-4 border-b text-center">Lvl</th>
+                          <th className="px-6 py-4 border-b text-right">Reward</th>
+                          <th className="px-6 py-4 border-b text-right">Max LGNS</th>
                         </tr>
-                      ))
-                    ) : data.length === 0 ? (
-                      <tr>
-                        <td colSpan={5} className="px-6 py-20 text-center">
-                          <p className="text-gray-500 italic font-medium">No activity matching current filters.</p>
-                          <button onClick={() => setThreshold(0)} className="mt-3 px-4 py-2 bg-indigo-50 text-indigo-600 text-xs font-bold rounded-full">Reset Threshold</button>
-                        </td>
-                      </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {loading && data.length === 0 ? (
+                          <tr><td colSpan={4} className="px-6 py-20 text-center text-gray-400 italic">Synchronizing network states...</td></tr>
+                        ) : filteredData.length === 0 ? (
+                          <tr><td colSpan={4} className="px-6 py-20 text-center text-gray-400 italic">No records matching criteria.</td></tr>
+                        ) : (
+                          filteredData.map((item) => (
+                            <tr key={item.address} className="hover:bg-indigo-50/30 transition-colors group">
+                              <td className="px-6 py-4 font-mono text-[13px] leading-relaxed">
+                                <div className="flex items-center space-x-3">
+                                  <span className="text-gray-900 break-all select-all">{item.address}</span>
+                                  <button 
+                                    onClick={() => handleCopy(item.address)}
+                                    className="flex-shrink-0 p-1.5 rounded bg-gray-50 text-gray-400 hover:text-indigo-600 hover:bg-white border border-transparent hover:border-indigo-100 transition-all shadow-sm group-hover:opacity-100 opacity-0 md:opacity-100"
+                                    title="Copy Address"
+                                  >
+                                    {copiedAddress === item.address ? (
+                                      <svg className="w-3.5 h-3.5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" /></svg>
+                                    ) : (
+                                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                                    )}
+                                  </button>
+                                </div>
+                              </td>
+                              <td className="px-6 py-4 text-center">
+                                <span className={`px-2.5 py-1 rounded text-[11px] font-bold ${item.level > 0 ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'}`}>
+                                  L{item.level}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4 text-right font-bold text-emerald-600 tabular-nums">
+                                {safeFixed(item.reward)}
+                              </td>
+                              <td className="px-6 py-4 text-right font-bold text-gray-900 tabular-nums">
+                                {safeFixed(item.latestLgns)}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+                  <h3 className="font-bold text-gray-900 mb-6">Top 10 Performance Profile</h3>
+                  <div className="h-64 w-full">
+                    {chartData.length > 0 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={chartData}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                          <XAxis dataKey="address" axisLine={false} tickLine={false} fontSize={10} dy={10} />
+                          <YAxis axisLine={false} tickLine={false} fontSize={10} />
+                          <Tooltip 
+                            cursor={{fill: '#f8fafc'}}
+                            contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
+                          />
+                          <Bar dataKey="amount" fill="#4f46e5" radius={[4,4,0,0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
                     ) : (
-                      data.map((item, idx) => (
-                        <tr key={item.address} className="hover:bg-indigo-50/30 transition-colors group">
-                          <td className="px-6 py-4">
-                            <div className="flex items-center space-x-2">
-                              <span className="text-[10px] font-bold text-gray-300">{idx + 1}</span>
-                              <span className="mono text-sm text-indigo-600 font-bold truncate max-w-[150px]">{item.address}</span>
-                              <button 
-                                onClick={() => navigator.clipboard.writeText(item.address)} 
-                                className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-white rounded border border-gray-200"
-                              >
-                                <svg className="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                              </button>
-                            </div>
-                          </td>
-                          <td className="px-6 py-4 text-center">
-                            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${item.level > 0 ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-500'}`}>
-                              Lvl {item.level}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4 text-right font-medium text-emerald-600">
-                            {item.reward.toFixed(1)}
-                          </td>
-                          <td className="px-6 py-4 text-right">
-                            <span className="text-sm font-bold text-gray-900">{item.latestLgns.toFixed(1)}</span>
-                            <span className="ml-1 text-[9px] text-gray-400 font-bold uppercase tracking-tighter">LGNS</span>
-                          </td>
-                          <td className="px-6 py-4 text-right">
-                            <div className="flex justify-end">
-                              <button 
-                                onClick={() => navigator.clipboard.writeText(item.latestTxHash)}
-                                className="p-1.5 bg-gray-50 text-gray-400 rounded hover:bg-indigo-50 hover:text-indigo-600 transition-colors border border-gray-100"
-                                title={`Copy TX Hash: ${item.latestTxHash}`}
-                              >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
-                                </svg>
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))
+                      <div className="h-full flex items-center justify-center text-gray-400 italic text-sm">No data matching filters.</div>
                     )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-              <h2 className="text-lg font-bold text-gray-900 mb-6">Top 10 LGNS Volume Distribution</h2>
-              <div className="h-80 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={chartData}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                    <XAxis dataKey="address" fontSize={10} axisLine={false} tickLine={false} dy={10} />
-                    <YAxis axisLine={false} tickLine={false} dx={-10} />
-                    <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} />
-                    <Bar dataKey="amount" radius={[4, 4, 0, 0]} fill="#4f46e5" />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-6">
-            <div className="bg-gradient-to-br from-indigo-600 to-blue-700 rounded-2xl p-6 text-white shadow-xl flex flex-col min-h-[400px]">
-              <div className="flex items-center space-x-2 mb-4">
-                <div className="bg-white/20 p-2 rounded-lg backdrop-blur-sm">
-                  <svg className="w-5 h-5 text-indigo-100" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-                </div>
-                <h3 className="font-bold">AI Status Intelligence</h3>
-              </div>
-              <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 text-sm">
-                {isAnalyzing ? (
-                  <div className="flex flex-col items-center py-12 space-y-3">
-                    <div className="w-8 h-8 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                    <p className="text-indigo-100 text-xs font-medium animate-pulse">Processing latest network metrics...</p>
                   </div>
-                ) : (
-                  <div className="prose prose-invert prose-sm">
-                    <p className="text-indigo-50 leading-relaxed whitespace-pre-line">
-                      {aiAnalysis || "Sync logs to generate AI-driven activity report."}
-                    </p>
-                  </div>
-                )}
+                </div>
               </div>
-            </div>
 
-            <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-              <h3 className="text-xs font-bold text-gray-900 mb-4 uppercase tracking-widest">Network Telemetry</h3>
-              <div className="space-y-3">
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-gray-500 font-medium">RPC Node</span>
-                  <span className="mono text-indigo-600 truncate max-w-[120px] font-bold">{rpcUrl}</span>
+              <div className="space-y-6">
+                <div className="bg-indigo-600 rounded-xl p-6 text-white shadow-lg min-h-[300px] flex flex-col">
+                  <div className="flex items-center space-x-2 mb-4">
+                    <svg className="w-5 h-5 text-indigo-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.364-6.364l-.707-.707M6.343 17.657l-.707.707m12.728 0l-.707-.707M12 5a7 7 0 00-7 7c0 1.603.546 3.08 1.464 4.242.484.612.907 1.251 1.25 1.932A2 2 0 009.52 20h4.96a2 2 0 001.763-1.17c.343-.68.766-1.32 1.25-1.932A7.003 7.003 0 0012 5z" /></svg>
+                    <h3 className="font-bold">AI Intelligence</h3>
+                  </div>
+                  <div className="flex-1 overflow-y-auto text-sm leading-relaxed text-indigo-50 scrollbar-hide">
+                    {isAnalyzing ? (
+                      <div className="flex flex-col items-center justify-center h-full space-y-3 animate-pulse">
+                        <div className="flex space-x-1">
+                          <div className="w-2 h-2 bg-white rounded-full"></div>
+                          <div className="w-2 h-2 bg-white rounded-full"></div>
+                          <div className="w-2 h-2 bg-white rounded-full"></div>
+                        </div>
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-indigo-200">Processing Insights</span>
+                      </div>
+                    ) : (
+                      <div className="prose prose-sm prose-invert max-w-none">
+                        {aiAnalysis || "Sync data to generate automated report."}
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-gray-500 font-medium">Window</span>
-                  <span className="font-bold text-gray-900">{blockRange.toLocaleString()} Blocks</span>
-                </div>
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-gray-500 font-medium">Step Size</span>
-                  <span className="font-bold text-gray-900">{scanChunkSize.toLocaleString()}</span>
-                </div>
-                <div className="pt-4 mt-4 border-t border-gray-100">
-                  <p className="text-[10px] text-gray-400 font-medium leading-relaxed uppercase tracking-tighter">
-                    Monitoring contract: <span className="mono bg-gray-50 px-1 rounded font-bold">{CONTRACT_ADDRESS.slice(0, 10)}...</span>
-                  </p>
+
+                <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+                  <h3 className="text-[10px] uppercase font-bold text-gray-400 mb-4 tracking-widest">Network Telemetry</h3>
+                  <div className="space-y-4 text-xs">
+                    <div className="flex flex-col space-y-1">
+                      <span className="text-gray-400 font-medium">RPC Source</span>
+                      <span className="font-mono text-indigo-600 break-all bg-indigo-50/50 p-2 rounded border border-indigo-100/50" title={rpcUrl}>{rpcUrl}</span>
+                    </div>
+                    <div className="flex justify-between items-center border-t border-gray-100 pt-3">
+                      <span className="text-gray-500 font-medium">Current Window</span>
+                      <span className="font-bold text-gray-900">{blockRange.toLocaleString()} Blocks (~10h)</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        </div>
+          </>
+        )}
       </main>
-
-      <footer className="bg-white border-t border-gray-200 py-12 mt-20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col items-center">
-          <p className="text-sm text-gray-500 font-bold tracking-tight">LGNS Analytics Explorer &copy; 2025</p>
-          <div className="flex items-center space-x-2 mt-2">
-            <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]"></div>
-            <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Global Account Registry</p>
-          </div>
-        </div>
-      </footer>
     </div>
   );
 };
