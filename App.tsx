@@ -209,6 +209,33 @@ const App: React.FC = () => {
     setTimeout(() => setCopiedAddress(null), 2000);
   };
 
+  const handleExportCSV = () => {
+    if (sortedAndFilteredData.length === 0) return;
+
+    const headers = ['Wallet Address', 'Level', 'DAO Reward', 'Spider Reward'];
+    const rows = sortedAndFilteredData.map(item => [
+      item.address,
+      item.level,
+      item.reward.toFixed(4),
+      item.latestLgns.toFixed(4)
+    ]);
+
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => row.join(','))
+    ].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `lgns_distribution_${new Date().toISOString().slice(0,10)}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const saveSettings = () => {
     localStorage.setItem('lgns_rpc', rpcUrl);
     localStorage.setItem('lgns_range', blockRange.toString());
@@ -335,7 +362,17 @@ const App: React.FC = () => {
               <div className="lg:col-span-2 space-y-6">
                 <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
                   <div className="px-6 py-4 bg-gray-50/50 border-b border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                    <h2 className="font-bold text-gray-900">Distribution Table</h2>
+                    <div className="flex items-center space-x-3">
+                      <h2 className="font-bold text-gray-900">Distribution Table</h2>
+                      <button 
+                        onClick={handleExportCSV}
+                        className="flex items-center space-x-1 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-[11px] font-bold text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-all shadow-sm active:scale-95"
+                        title="Export current view to CSV"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                        <span>Export CSV</span>
+                      </button>
+                    </div>
                     <div className="relative flex-1 max-w-md">
                       <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                         <svg className="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
