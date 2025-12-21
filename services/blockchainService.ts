@@ -2,7 +2,12 @@
 import { CONTRACT_ADDRESS, TOPIC_SIGNATURE, LGNS_PRECISION } from '../constants.ts';
 import { LGNSEvent } from '../types.ts';
 
-export const fetchPolygonLogs = async (rpcUrl: string, totalBlockCount: number, chunkSize: number): Promise<LGNSEvent[]> => {
+export const fetchPolygonLogs = async (
+  rpcUrl: string, 
+  totalBlockCount: number, 
+  chunkSize: number,
+  onProgress?: (scanned: number, total: number) => void
+): Promise<LGNSEvent[]> => {
   try {
     const blockRes = await fetch(rpcUrl, {
       method: 'POST',
@@ -21,9 +26,15 @@ export const fetchPolygonLogs = async (rpcUrl: string, totalBlockCount: number, 
     const startBlock = Math.max(0, latestBlock - totalBlockCount);
     
     let allEvents: LGNSEvent[] = [];
+    const totalToScan = latestBlock - startBlock;
     
     for (let currentFrom = startBlock; currentFrom < latestBlock; currentFrom += chunkSize) {
       const currentTo = Math.min(currentFrom + chunkSize - 1, latestBlock);
+      
+      // Reporting progress
+      if (onProgress) {
+        onProgress(currentFrom - startBlock, totalToScan);
+      }
       
       const logsRes = await fetch(rpcUrl, {
         method: 'POST',
@@ -64,6 +75,9 @@ export const fetchPolygonLogs = async (rpcUrl: string, totalBlockCount: number, 
       
       allEvents = [...allEvents, ...chunkEvents];
     }
+    
+    // Final progress update
+    if (onProgress) onProgress(totalToScan, totalToScan);
 
     return allEvents;
   } catch (error) {

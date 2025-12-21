@@ -26,7 +26,9 @@ const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [searchAddress, setSearchAddress] = useState('');
   
-  // Sorting state
+  const [actualScanRange, setActualScanRange] = useState<{ start: number; end: number } | null>(null);
+  const [scanProgress, setScanProgress] = useState({ current: 0, total: 0 });
+  
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; direction: SortDirection }>({ 
     key: 'latestLgns', 
     direction: 'desc' 
@@ -46,8 +48,32 @@ const App: React.FC = () => {
       setLoading(true);
       setLoadingStage('logs');
       setError(null);
+      setScanProgress({ current: 0, total: 0 });
       
-      const logs = await fetchPolygonLogs(rpcUrl, blockRange, scanChunkSize);
+      const blockRes = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'eth_blockNumber',
+          params: [],
+        }),
+      });
+      const blockJson = await blockRes.json();
+      if (!blockJson.error) {
+        const latest = parseInt(blockJson.result, 16);
+        const start = Math.max(0, latest - blockRange);
+        setActualScanRange({ start, end: latest });
+      }
+
+      const logs = await fetchPolygonLogs(
+        rpcUrl, 
+        blockRange, 
+        scanChunkSize,
+        (scanned, total) => setScanProgress({ current: scanned, total })
+      );
+      
       if (!Array.isArray(logs)) throw new Error("Invalid response from blockchain node.");
       
       const contractLower = (CONTRACT_ADDRESS || "").toLowerCase();
@@ -149,39 +175,25 @@ const App: React.FC = () => {
 
   const sortedAndFilteredData = useMemo(() => {
     let result = [...data];
-    
-    // Search filter
     if (searchAddress) {
       const lowerSearch = searchAddress.toLowerCase();
       result = result.filter(item => item.address.toLowerCase().includes(lowerSearch));
     }
-
-    // Sort
     if (sortConfig.direction) {
       result.sort((a, b) => {
         const valA = Number(a[sortConfig.key]) || 0;
         const valB = Number(b[sortConfig.key]) || 0;
-        
         if (valA === valB) return 0;
-        
-        if (sortConfig.direction === 'asc') {
-          return valA - valB;
-        } else {
-          return valB - valA;
-        }
+        return sortConfig.direction === 'asc' ? valA - valB : valB - valA;
       });
     } else {
-      // Default fallback sort (highest Spider Reward)
       result.sort((a, b) => b.latestLgns - a.latestLgns);
     }
-
     return result;
   }, [data, searchAddress, sortConfig]);
 
   const stats: DashboardStats = useMemo(() => {
-    if (!data || !Array.isArray(data) || data.length === 0) {
-      return { totalUsers: 0, totalLgns: 0, avgLevel: 0, peakOutput: 0 };
-    }
+    if (!data || data.length === 0) return { totalUsers: 0, totalLgns: 0, avgLevel: 0, peakOutput: 0 };
     const totalLgns = data.reduce((acc, curr) => acc + (Number(curr.latestLgns) || 0), 0);
     const peak = data.reduce((max, d) => Math.max(max, Number(d.latestLgns) || 0), 0);
     const avgLvl = data.reduce((acc, curr) => acc + (Number(curr.level) || 0), 0) / data.length;
@@ -199,8 +211,7 @@ const App: React.FC = () => {
 
   const safeFixed = (val: any, decimals: number = 2) => {
     const num = Number(val);
-    if (isNaN(num)) return "0.00";
-    return num.toFixed(decimals);
+    return isNaN(num) ? "0.00" : num.toFixed(decimals);
   };
 
   const handleCopy = (text: string) => {
@@ -211,29 +222,15 @@ const App: React.FC = () => {
 
   const handleExportCSV = () => {
     if (sortedAndFilteredData.length === 0) return;
-
     const headers = ['Wallet Address', 'Level', 'DAO Reward', 'Spider Reward'];
-    const rows = sortedAndFilteredData.map(item => [
-      item.address,
-      item.level,
-      item.reward.toFixed(4),
-      item.latestLgns.toFixed(4)
-    ]);
-
-    const csvContent = [
-      headers.join(','),
-      ...rows.map(row => row.join(','))
-    ].join('\n');
-
+    const rows = sortedAndFilteredData.map(item => [item.address, item.level, item.reward.toFixed(4), item.latestLgns.toFixed(4)]);
+    const csvContent = [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
     link.setAttribute('download', `lgns_distribution_${new Date().toISOString().slice(0,10)}.csv`);
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
     link.click();
-    document.body.removeChild(link);
   };
 
   const saveSettings = () => {
@@ -247,9 +244,11 @@ const App: React.FC = () => {
 
   const getLoadingText = () => {
     switch(loadingStage) {
-      case 'logs': return 'Reading Polygon Logs...';
-      case 'rewards': return `Fetching Community (${rewardProgress.current}/${rewardProgress.total})`;
-      case 'analyzing': return 'Running AI Insights...';
+      case 'logs': 
+        const progress = scanProgress.total > 0 ? Math.floor((scanProgress.current / scanProgress.total) * 100) : 0;
+        return `Scanning Chain: ${progress}%`;
+      case 'rewards': return `Rewards Sync (${rewardProgress.current}/${rewardProgress.total})`;
+      case 'analyzing': return 'AI Reasoning...';
       default: return 'Loading...';
     }
   };
@@ -281,15 +280,16 @@ const App: React.FC = () => {
             <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold shadow-sm">L</div>
             <div className="flex flex-col">
               <h1 className="text-xl font-bold text-gray-900 tracking-tight leading-none">LGNS Registry</h1>
-              <span className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">10H Network Pulse</span>
+              <span className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">Blockchain Analytics</span>
             </div>
           </div>
           <div className="flex items-center space-x-3">
-            <button onClick={() => setShowSettings(!showSettings)} className="p-2 text-gray-500 hover:bg-indigo-50 hover:text-indigo-600 rounded-md transition-colors" title="Settings">
+            <button onClick={() => setShowSettings(!showSettings)} className={`p-2 rounded-md transition-colors ${showSettings ? 'bg-indigo-50 text-indigo-600' : 'text-gray-500 hover:bg-gray-100'}`} title="Config Settings">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg>
             </button>
-            <button onClick={processLogs} disabled={loading} className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm font-bold disabled:opacity-50 min-w-[140px] shadow-sm hover:bg-indigo-700 transition-all">
-              {loading ? getLoadingText() : 'Refresh Data'}
+            <button onClick={processLogs} disabled={loading} className="bg-indigo-600 text-white px-5 py-2 rounded-md text-sm font-bold disabled:bg-indigo-400 min-w-[150px] shadow-sm hover:bg-indigo-700 transition-all flex items-center justify-center space-x-2">
+              {loading && <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>}
+              <span>{loading ? getLoadingText() : 'Refresh Data'}</span>
             </button>
           </div>
         </div>
@@ -297,40 +297,26 @@ const App: React.FC = () => {
 
       {showSettings && (
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-4 animate-in fade-in slide-in-from-top-2 duration-300">
-          <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-xl space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+          <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-xl border-t-4 border-t-indigo-500">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
               <div className="flex flex-col space-y-1.5">
                 <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">RPC Endpoint</label>
-                <input 
-                  type="text" 
-                  value={rpcUrl} 
-                  onChange={e => setRpcUrl(e.target.value)} 
-                  className="bg-gray-50 text-gray-900 border border-gray-300 p-3 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none w-full shadow-sm"
-                />
+                <input type="text" value={rpcUrl} onChange={e => setRpcUrl(e.target.value)} className="bg-gray-50 text-gray-900 border border-gray-300 p-3 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none w-full shadow-sm" />
               </div>
               <div className="flex flex-col space-y-1.5">
-                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Window (Blocks)</label>
-                <input 
-                  type="number" 
-                  value={blockRange} 
-                  onChange={e => setBlockRange(Number(e.target.value))} 
-                  className="bg-gray-50 text-gray-900 border border-gray-300 p-3 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none w-full shadow-sm"
-                />
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Window (Total Blocks)</label>
+                <input type="number" value={blockRange} onChange={e => setBlockRange(Number(e.target.value))} className="bg-gray-50 text-gray-900 border border-gray-300 p-3 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none w-full shadow-sm" />
               </div>
               <div className="flex flex-col space-y-1.5">
-                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Min Threshold (LGNS)</label>
-                <input 
-                  type="number" 
-                  value={threshold} 
-                  onChange={e => setThreshold(Number(e.target.value))} 
-                  className="bg-gray-50 text-gray-900 border border-gray-300 p-3 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none w-full shadow-sm"
-                />
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Request Range (Chunk Size)</label>
+                <input type="number" value={scanChunkSize} onChange={e => setScanChunkSize(Number(e.target.value))} className="bg-gray-50 text-gray-900 border border-gray-300 p-3 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none w-full shadow-sm" />
+              </div>
+              <div className="flex flex-col space-y-1.5">
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Min Threshold</label>
+                <input type="number" value={threshold} onChange={e => setThreshold(Number(e.target.value))} className="bg-gray-50 text-gray-900 border border-gray-300 p-3 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none w-full shadow-sm" />
               </div>
               <div className="flex items-end">
-                <button 
-                  onClick={saveSettings} 
-                  className="bg-indigo-600 text-white w-full py-3 px-4 rounded-lg font-bold text-sm hover:bg-indigo-700 shadow-md transition-all active:scale-[0.98]"
-                >
+                <button onClick={saveSettings} className="bg-indigo-600 text-white w-full py-3 px-4 rounded-lg font-bold text-sm hover:bg-indigo-700 shadow-md transition-all active:scale-[0.98]">
                   Apply & Synchronize
                 </button>
               </div>
@@ -340,14 +326,27 @@ const App: React.FC = () => {
       )}
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {loading && loadingStage === 'logs' && (
+           <div className="mb-8 animate-in fade-in duration-500">
+             <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-4 shadow-sm">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-xs font-bold text-indigo-600 uppercase tracking-wider">Blockchain Scan Progress</span>
+                  <span className="text-xs font-bold text-indigo-600">{Math.floor((scanProgress.current / scanProgress.total) * 100) || 0}%</span>
+                </div>
+                <div className="w-full bg-indigo-200 rounded-full h-2">
+                  <div className="bg-indigo-600 h-2 rounded-full transition-all duration-300 ease-out" style={{ width: `${(scanProgress.current / scanProgress.total) * 100}%` }}></div>
+                </div>
+                <p className="text-[10px] text-indigo-400 mt-2 font-mono">
+                  Offset: {scanProgress.current.toLocaleString()} / {scanProgress.total.toLocaleString()} blocks processed
+                </p>
+             </div>
+           </div>
+        )}
+
         {error ? (
           <div className="bg-red-50 border border-red-200 text-red-700 p-6 rounded-xl flex items-center space-x-4 shadow-sm">
             <svg className="w-12 h-12 text-red-400" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" /></svg>
-            <div>
-              <p className="font-bold text-lg">System Error</p>
-              <p className="text-sm">{error}</p>
-              <button onClick={processLogs} className="mt-2 text-xs font-bold underline hover:no-underline">Retry Data Sync</button>
-            </div>
+            <div><p className="font-bold text-lg">System Error</p><p className="text-sm">{error}</p><button onClick={processLogs} className="mt-2 text-xs font-bold underline hover:no-underline">Retry Data Sync</button></div>
           </div>
         ) : (
           <>
@@ -364,26 +363,14 @@ const App: React.FC = () => {
                   <div className="px-6 py-4 bg-gray-50/50 border-b border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div className="flex items-center space-x-3">
                       <h2 className="font-bold text-gray-900">Distribution Table</h2>
-                      <button 
-                        onClick={handleExportCSV}
-                        className="flex items-center space-x-1 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-[11px] font-bold text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-all shadow-sm active:scale-95"
-                        title="Export current view to CSV"
-                      >
+                      <button onClick={handleExportCSV} className="flex items-center space-x-1 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-[11px] font-bold text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-all shadow-sm active:scale-95" title="Export current view to CSV">
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
                         <span>Export CSV</span>
                       </button>
                     </div>
                     <div className="relative flex-1 max-w-md">
-                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                        <svg className="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-                      </div>
-                      <input 
-                        type="text" 
-                        placeholder="Filter by address..." 
-                        value={searchAddress}
-                        onChange={(e) => setSearchAddress(e.target.value)}
-                        className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg leading-5 bg-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-all"
-                      />
+                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><svg className="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg></div>
+                      <input type="text" placeholder="Filter by address..." value={searchAddress} onChange={(e) => setSearchAddress(e.target.value)} className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg leading-5 bg-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-all" />
                     </div>
                   </div>
                   <div className="overflow-x-auto">
@@ -391,24 +378,9 @@ const App: React.FC = () => {
                       <thead className="bg-gray-50 text-gray-500 font-bold uppercase text-[10px]">
                         <tr>
                           <th className="px-6 py-4 border-b">Full Wallet Address</th>
-                          <th 
-                            className="px-4 py-4 border-b text-center cursor-pointer hover:bg-gray-100 transition-colors group select-none"
-                            onClick={() => handleSort('level')}
-                          >
-                            <div className="flex items-center justify-center">Lvl <SortIcon column="level" /></div>
-                          </th>
-                          <th 
-                            className="px-6 py-4 border-b text-right cursor-pointer hover:bg-gray-100 transition-colors group select-none"
-                            onClick={() => handleSort('reward')}
-                          >
-                            <div className="flex items-center justify-end">DAO Reward <SortIcon column="reward" /></div>
-                          </th>
-                          <th 
-                            className="px-6 py-4 border-b text-right cursor-pointer hover:bg-gray-100 transition-colors group select-none"
-                            onClick={() => handleSort('latestLgns')}
-                          >
-                            <div className="flex items-center justify-end">Spider Reward <SortIcon column="latestLgns" /></div>
-                          </th>
+                          <th className="px-4 py-4 border-b text-center cursor-pointer hover:bg-gray-100 transition-colors group select-none" onClick={() => handleSort('level')}><div className="flex items-center justify-center">Lvl <SortIcon column="level" /></div></th>
+                          <th className="px-6 py-4 border-b text-right cursor-pointer hover:bg-gray-100 transition-colors group select-none" onClick={() => handleSort('reward')}><div className="flex items-center justify-end">DAO Reward <SortIcon column="reward" /></div></th>
+                          <th className="px-6 py-4 border-b text-right cursor-pointer hover:bg-gray-100 transition-colors group select-none" onClick={() => handleSort('latestLgns')}><div className="flex items-center justify-end">Spider Reward <SortIcon column="latestLgns" /></div></th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
@@ -422,30 +394,14 @@ const App: React.FC = () => {
                               <td className="px-6 py-4 font-mono text-[13px] leading-relaxed">
                                 <div className="flex items-center space-x-3">
                                   <span className="text-gray-900 break-all select-all">{item.address}</span>
-                                  <button 
-                                    onClick={() => handleCopy(item.address)}
-                                    className="flex-shrink-0 p-1.5 rounded bg-gray-50 text-gray-400 hover:text-indigo-600 hover:bg-white border border-transparent hover:border-indigo-100 transition-all shadow-sm group-hover:opacity-100 opacity-0 md:opacity-100"
-                                    title="Copy Address"
-                                  >
-                                    {copiedAddress === item.address ? (
-                                      <svg className="w-3.5 h-3.5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" /></svg>
-                                    ) : (
-                                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-                                    )}
+                                  <button onClick={() => handleCopy(item.address)} className="flex-shrink-0 p-1.5 rounded bg-gray-50 text-gray-400 hover:text-indigo-600 hover:bg-white border border-transparent hover:border-indigo-100 transition-all shadow-sm group-hover:opacity-100 opacity-0 md:opacity-100" title="Copy Address">
+                                    {copiedAddress === item.address ? <svg className="w-3.5 h-3.5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" /></svg> : <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>}
                                   </button>
                                 </div>
                               </td>
-                              <td className="px-4 py-4 text-center">
-                                <span className={`px-2.5 py-1 rounded text-[11px] font-bold ${item.level > 0 ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'}`}>
-                                  L{item.level}
-                                </span>
-                              </td>
-                              <td className="px-6 py-4 text-right font-bold text-emerald-600 tabular-nums">
-                                {safeFixed(item.reward)}
-                              </td>
-                              <td className="px-6 py-4 text-right font-bold text-gray-900 tabular-nums">
-                                {safeFixed(item.latestLgns)}
-                              </td>
+                              <td className="px-4 py-4 text-center"><span className={`px-2.5 py-1 rounded text-[11px] font-bold ${item.level > 0 ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'}`}>L{item.level}</span></td>
+                              <td className="px-6 py-4 text-right font-bold text-emerald-600 tabular-nums">{safeFixed(item.reward)}</td>
+                              <td className="px-6 py-4 text-right font-bold text-gray-900 tabular-nums">{safeFixed(item.latestLgns)}</td>
                             </tr>
                           ))
                         )}
@@ -463,16 +419,11 @@ const App: React.FC = () => {
                           <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                           <XAxis dataKey="address" axisLine={false} tickLine={false} fontSize={10} dy={10} />
                           <YAxis axisLine={false} tickLine={false} fontSize={10} />
-                          <Tooltip 
-                            cursor={{fill: '#f8fafc'}}
-                            contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
-                          />
+                          <Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }} />
                           <Bar dataKey="amount" fill="#4f46e5" radius={[4,4,0,0]} />
                         </BarChart>
                       </ResponsiveContainer>
-                    ) : (
-                      <div className="h-full flex items-center justify-center text-gray-400 italic text-sm">No data matching filters.</div>
-                    )}
+                    ) : <div className="h-full flex items-center justify-center text-gray-400 italic text-sm">No data matching filters.</div>}
                   </div>
                 </div>
               </div>
@@ -486,18 +437,10 @@ const App: React.FC = () => {
                   <div className="flex-1 overflow-y-auto text-sm leading-relaxed text-indigo-50 scrollbar-hide">
                     {isAnalyzing ? (
                       <div className="flex flex-col items-center justify-center h-full space-y-3 animate-pulse">
-                        <div className="flex space-x-1">
-                          <div className="w-2 h-2 bg-white rounded-full"></div>
-                          <div className="w-2 h-2 bg-white rounded-full"></div>
-                          <div className="w-2 h-2 bg-white rounded-full"></div>
-                        </div>
+                        <div className="flex space-x-1"><div className="w-2 h-2 bg-white rounded-full"></div><div className="w-2 h-2 bg-white rounded-full"></div><div className="w-2 h-2 bg-white rounded-full"></div></div>
                         <span className="text-[10px] font-bold uppercase tracking-widest text-indigo-200">Processing Insights</span>
                       </div>
-                    ) : (
-                      <div className="prose prose-sm prose-invert max-w-none">
-                        {aiAnalysis || "Sync data to generate automated report."}
-                      </div>
-                    )}
+                    ) : <div className="prose prose-sm prose-invert max-w-none">{aiAnalysis || "Sync data to generate automated report."}</div>}
                   </div>
                 </div>
 
@@ -508,13 +451,23 @@ const App: React.FC = () => {
                       <span className="text-gray-400 font-medium">RPC Source</span>
                       <span className="font-mono text-indigo-600 break-all bg-indigo-50/50 p-2 rounded border border-indigo-100/50" title={rpcUrl}>{rpcUrl}</span>
                     </div>
-                    <div className="flex justify-between items-center border-t border-gray-100 pt-3">
-                      <span className="text-gray-500 font-medium">Current Window</span>
-                      <span className="font-bold text-gray-900">{blockRange.toLocaleString()} Blocks (~10h)</span>
+                    <div className="grid grid-cols-2 gap-2 border-t border-gray-100 pt-3">
+                      <div className="flex flex-col space-y-0.5">
+                        <span className="text-gray-400 font-medium">Start Block</span>
+                        <span className="font-bold text-gray-900">{actualScanRange?.start?.toLocaleString() || '---'}</span>
+                      </div>
+                      <div className="flex flex-col space-y-0.5 text-right">
+                        <span className="text-gray-400 font-medium">End Block</span>
+                        <span className="font-bold text-gray-900">{actualScanRange?.end?.toLocaleString() || '---'}</span>
+                      </div>
                     </div>
                     <div className="flex justify-between items-center border-t border-gray-100 pt-3">
-                      <span className="text-gray-500 font-medium">Precision Factor</span>
-                      <span className="font-bold text-gray-900">10^{LGNS_PRECISION}</span>
+                      <span className="text-gray-500 font-medium">Total Window</span>
+                      <span className="font-bold text-gray-900">{blockRange.toLocaleString()} Blocks</span>
+                    </div>
+                    <div className="flex justify-between items-center border-t border-gray-100 pt-3">
+                      <span className="text-gray-500 font-medium">Batch Size (Chunk)</span>
+                      <span className="font-bold text-gray-900">{scanChunkSize.toLocaleString()}</span>
                     </div>
                   </div>
                 </div>
