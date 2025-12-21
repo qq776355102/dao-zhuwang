@@ -223,14 +223,21 @@ const App: React.FC = () => {
   const handleExportCSV = () => {
     if (sortedAndFilteredData.length === 0) return;
     const headers = ['Wallet Address', 'Level', 'DAO Reward', 'Spider Reward'];
-    const rows = sortedAndFilteredData.map(item => [item.address, item.level, item.reward.toFixed(4), item.latestLgns.toFixed(4)]);
+    const rows = sortedAndFilteredData.map(item => [
+      item.address, 
+      item.level, 
+      safeFixed(item.reward, 4), 
+      safeFixed(item.latestLgns, 4)
+    ]);
     const csvContent = [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
     link.setAttribute('download', `lgns_distribution_${new Date().toISOString().slice(0,10)}.csv`);
+    document.body.appendChild(link);
     link.click();
+    document.body.removeChild(link);
   };
 
   const saveSettings = () => {
